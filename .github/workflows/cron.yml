@@ -1,0 +1,33 @@
+name: Scraper Cron
+
+on:
+  schedule:
+    - cron: "0 11 * * *" # diario 06:00 hora Peru (UTC-5)
+  workflow_dispatch: # ejecución manual
+
+jobs:
+  run-scraper:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run scraper
+        run: npm start
+        env:
+          SCRAPER_SUPABASE_URL: ${{ secrets.SCRAPER_SUPABASE_URL }}
+          SCRAPER_SUPABASE_KEY: ${{ secrets.SCRAPER_SUPABASE_KEY }}
+          SCRAPER_REQUEST_TIMEOUT_MS: 15000
+          NEWS_MAX_PER_FEED: 10
+          NEWS_RUN_ONCE_DAILY: true
