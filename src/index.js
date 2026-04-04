@@ -1,4 +1,4 @@
-import 'dotenv/config.js';
+import 'dotenv/config';
 import { runCycle } from './scraper.js';
 try {
   const summary = await runCycle();

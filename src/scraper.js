@@ -70,6 +70,52 @@ const CATEGORY_KEYWORDS = {
   ],
 };
 
+const STOPWORDS = new Set([
+  'a', 'al', 'algo', 'ante', 'con', 'contra', 'como', 'cual', 'de', 'del', 'desde',
+  'donde', 'dos', 'el', 'ella', 'ellas', 'ellos', 'en', 'entre', 'era', 'es', 'esa',
+  'ese', 'eso', 'esta', 'este', 'esto', 'fue', 'ha', 'hay', 'la', 'las', 'lo', 'los',
+  'mas', 'me', 'mi', 'mis', 'muy', 'no', 'nos', 'o', 'para', 'pero', 'por', 'que',
+  'se', 'si', 'sin', 'sobre', 'su', 'sus', 'te', 'tu', 'un', 'una', 'uno', 'y',
+]);
+
+const FREE_IMAGE_CATALOG = {
+  economia: [
+    'https://images.pexels.com/photos/4386366/pexels-photo-4386366.jpeg?auto=compress&cs=tinysrgb&w=1600',
+    'https://images.pexels.com/photos/730547/pexels-photo-730547.jpeg?auto=compress&cs=tinysrgb&w=1600',
+    'https://images.pexels.com/photos/7821702/pexels-photo-7821702.jpeg?auto=compress&cs=tinysrgb&w=1600',
+  ],
+  'finanzas-personales': [
+    'https://images.pexels.com/photos/4968387/pexels-photo-4968387.jpeg?auto=compress&cs=tinysrgb&w=1600',
+    'https://images.pexels.com/photos/3943720/pexels-photo-3943720.jpeg?auto=compress&cs=tinysrgb&w=1600',
+    'https://images.pexels.com/photos/7567444/pexels-photo-7567444.jpeg?auto=compress&cs=tinysrgb&w=1600',
+  ],
+  analisis: [
+    'https://images.pexels.com/photos/6693655/pexels-photo-6693655.jpeg?auto=compress&cs=tinysrgb&w=1600',
+    'https://images.pexels.com/photos/6801648/pexels-photo-6801648.jpeg?auto=compress&cs=tinysrgb&w=1600',
+    'https://images.pexels.com/photos/7681091/pexels-photo-7681091.jpeg?auto=compress&cs=tinysrgb&w=1600',
+  ],
+  educacion: [
+    'https://images.pexels.com/photos/5212324/pexels-photo-5212324.jpeg?auto=compress&cs=tinysrgb&w=1600',
+    'https://images.pexels.com/photos/5427641/pexels-photo-5427641.jpeg?auto=compress&cs=tinysrgb&w=1600',
+    'https://images.pexels.com/photos/159740/library-la-trobe-study-students-159740.jpeg?auto=compress&cs=tinysrgb&w=1600',
+  ],
+  comparativas: [
+    'https://images.pexels.com/photos/669610/pexels-photo-669610.jpeg?auto=compress&cs=tinysrgb&w=1600',
+    'https://images.pexels.com/photos/590020/pexels-photo-590020.jpeg?auto=compress&cs=tinysrgb&w=1600',
+    'https://images.pexels.com/photos/7681674/pexels-photo-7681674.jpeg?auto=compress&cs=tinysrgb&w=1600',
+  ],
+  guias: [
+    'https://images.pexels.com/photos/3811082/pexels-photo-3811082.jpeg?auto=compress&cs=tinysrgb&w=1600',
+    'https://images.pexels.com/photos/669615/pexels-photo-669615.jpeg?auto=compress&cs=tinysrgb&w=1600',
+    'https://images.pexels.com/photos/5428010/pexels-photo-5428010.jpeg?auto=compress&cs=tinysrgb&w=1600',
+  ],
+  general: [
+    'https://images.pexels.com/photos/4386339/pexels-photo-4386339.jpeg?auto=compress&cs=tinysrgb&w=1600',
+    'https://images.pexels.com/photos/6801874/pexels-photo-6801874.jpeg?auto=compress&cs=tinysrgb&w=1600',
+    'https://images.pexels.com/photos/3943716/pexels-photo-3943716.jpeg?auto=compress&cs=tinysrgb&w=1600',
+  ],
+};
+
 function sanitizeText(text) {
   return String(text ?? '')
     .replaceAll(/<!\[CDATA\[|\]\]>/g, '')
@@ -103,6 +149,16 @@ function readTimeMinutes(text) {
   return Math.max(1, Math.ceil(words / 220));
 }
 
+function tokenizeForTags(text) {
+  return sanitizeText(text)
+    .normalize('NFD')
+    .replaceAll(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9\s-]/g, ' ')
+    .split(/\s+/)
+    .filter((token) => token.length >= 4 && !STOPWORDS.has(token));
+}
+
 function stableHash(input) {
   let hash = 0;
   const value = String(input ?? '');
@@ -112,6 +168,45 @@ function stableHash(input) {
   }
 
   return hash.toString(36);
+}
+
+function pickFeaturedImage(categorySlug, seedInput) {
+  const pool = FREE_IMAGE_CATALOG[categorySlug] ?? FREE_IMAGE_CATALOG.general;
+  const hash = stableHash(seedInput);
+  const index = Number.parseInt(hash.slice(0, 6), 36) % pool.length;
+  return pool[index];
+}
+
+function buildTags(item, categorySlug, source) {
+  const ranked = new Map();
+
+  for (const token of tokenizeForTags(`${item.title} ${item.excerpt}`)) {
+    ranked.set(token, (ranked.get(token) ?? 0) + 1);
+  }
+
+  const dynamicTags = [...ranked.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 7)
+    .map(([token]) => token);
+
+  const fixedTags = [
+    'peru',
+    categorySlug,
+    slugify(source),
+    'actualidad-economica',
+  ].filter(Boolean);
+
+  return [...new Set([...fixedTags, ...dynamicTags])].slice(0, 12);
+}
+
+function buildAnalysisText(item, categorySlug, source) {
+  const cleanExcerpt = sanitizeText(item.excerpt).slice(0, 240);
+  return [
+    'Analisis editorial:',
+    `Este contenido de ${source} se clasifica en ${categorySlug} por su enfoque tematico y relevancia para decisiones financieras locales.`,
+    `Punto clave para el lector: ${cleanExcerpt || 'seguir la evolucion del tema y su impacto potencial en el bolsillo del consumidor.'}`,
+    'Valor agregado: usa esta nota como contexto y contrastala con indicadores oficiales antes de tomar decisiones economicas.',
+  ].join(' ');
 }
 
 function extractItemsFromRss(xml) {
@@ -202,7 +297,7 @@ function detectCategorySlug(item, availableSlugs) {
   return availableSlugs.values().next().value;
 }
 
-function buildArticleRecord(item, categoryId, source) {
+function buildArticleRecord(item, categoryId, categorySlug, source) {
   const baseSlug = slugify(item.title).slice(0, 80) || 'noticia';
   const uniq = stableHash(item.link || item.title).slice(0, 8);
   const slug = `${baseSlug}-${uniq}`;
@@ -222,6 +317,9 @@ function buildArticleRecord(item, categoryId, source) {
     title: item.title,
     excerpt: item.excerpt,
     body_html: item.bodyHtml,
+    tags: buildTags(item, categorySlug, source),
+    featured_image: pickFeaturedImage(categorySlug, `${item.link}|${item.title}`),
+    analysis_text: buildAnalysisText(item, categorySlug, source),
     category_id: categoryId,
     read_time_minutes: readTimeMinutes(bodyText),
     featured: false,
@@ -333,7 +431,7 @@ export async function runCycle() {
             return null;
           }
 
-          return buildArticleRecord(item, categoryId, feed.source);
+          return buildArticleRecord(item, categoryId, categorySlug, feed.source);
         })
         .filter(Boolean);
 
