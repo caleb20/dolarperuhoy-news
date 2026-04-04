@@ -1,10 +1,20 @@
 import { supabase } from './supabase.js';
 const timeoutMs = Number(process.env.SCRAPER_REQUEST_TIMEOUT_MS ?? 15000);
-const maxPerFeed = Number(process.env.NEWS_MAX_PER_FEED ?? 10);
-const runOnceDaily = process.env.NEWS_RUN_ONCE_DAILY !== 'false';
+const maxPerFeed = Number(process.env.NEWS_MAX_PER_FEED ?? 6);
+const runOnceDaily = process.env.NEWS_RUN_ONCE_DAILY === 'true';
 const forceRun = process.env.NEWS_FORCE_RUN === '1';
+const TRACKING_QUERY_KEYS = new Set([
+  'utm_source',
+  'utm_medium',
+  'utm_campaign',
+  'utm_term',
+  'utm_content',
+  'fbclid',
+  'gclid',
+  'igshid',
+]);
 
-const FEEDS = [
+const BASE_FEEDS = [
   {
     source: 'El Comercio',
     url: 'https://elcomercio.pe/arc/outboundfeeds/rss/category/economia/?outputType=xml',
@@ -41,7 +51,61 @@ const FEEDS = [
     source: 'Andina',
     url: 'https://andina.pe/agencia/rssdeportes.aspx',
   },
+  {
+    source: 'RPP',
+    url: 'https://rpp.pe/rss',
+  },
+  {
+    source: 'La Republica',
+    url: 'https://larepublica.pe/rss/economia.xml',
+  },
 ];
+
+function parseExtraFeedsFromEnv() {
+  const raw = String(process.env.NEWS_EXTRA_FEEDS ?? '').trim();
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed
+      .map((item) => ({
+        source: sanitizeText(item?.source),
+        url: String(item?.url ?? '').trim(),
+      }))
+      .filter((item) => item.source && /^https?:\/\//i.test(item.url));
+  } catch {
+    return [];
+  }
+}
+
+function mergeFeeds(baseFeeds, extraFeeds) {
+  const merged = [];
+  const seen = new Set();
+
+  for (const feed of [...baseFeeds, ...extraFeeds]) {
+    if (!feed?.source || !feed?.url) {
+      continue;
+    }
+
+    const key = `${feed.source.toLowerCase()}|${feed.url.toLowerCase()}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    merged.push(feed);
+  }
+
+  return merged;
+}
+
+const FEEDS = mergeFeeds(BASE_FEEDS, parseExtraFeedsFromEnv());
 
 const CATEGORY_KEYWORDS = {
   'finanzas-personales': [
@@ -138,10 +202,162 @@ function slugify(value) {
     .normalize('NFD')
     .replaceAll(/[\u0300-\u036f]/g, '')
     .toLowerCase()
-    .replaceAll(/[^a-z0-9\s-]/g, '')
+    .replaceAll(/(\d)[.,](\d)/g, '$1-$2')
+    .replaceAll(/[^a-z0-9\s-]/g, ' ')
     .replaceAll(/\s+/g, '-')
     .replaceAll(/-+/g, '-')
     .replaceAll(/^-|-$/g, '');
+}
+
+function normalizeForSearch(value) {
+  return sanitizeText(value)
+    .normalize('NFD')
+    .replaceAll(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9\s-]/g, ' ')
+    .replaceAll(/\s+/g, ' ')
+    .trim();
+}
+
+const RELEVANT_KEYWORDS_PERU = [
+  'peru',
+  'dolar',
+  'tipo de cambio',
+  'economia',
+  'finanzas',
+  'banco',
+  'sunat',
+  'afp',
+  'cts',
+  'inversion',
+];
+
+const EXCLUDED_KEYWORDS_PERU = [
+  'iran',
+  'israel',
+  'ucrania',
+  'guerra',
+  'drones',
+  'bombardeo',
+  'erdogan',
+  'zelensky',
+  'opinion',
+  'editorial',
+  'efemerides',
+];
+
+const DOLLAR_RELEVANT_KEYWORDS = ['dolar', 'tipo de cambio'];
+const BANK_FINANCE_KEYWORDS = [
+  'banco',
+  'bancos',
+  'finanzas',
+  'financiero',
+  'financiera',
+  'fintech',
+  'credito',
+  'inversion',
+  'afp',
+  'cts',
+  'sunat',
+];
+
+const RELEVANT_KEYWORDS_PERU_NORMALIZED = RELEVANT_KEYWORDS_PERU.map((keyword) =>
+  normalizeForSearch(keyword)
+);
+const EXCLUDED_KEYWORDS_PERU_NORMALIZED = EXCLUDED_KEYWORDS_PERU.map((keyword) =>
+  normalizeForSearch(keyword)
+);
+const DOLLAR_RELEVANT_KEYWORDS_NORMALIZED = DOLLAR_RELEVANT_KEYWORDS.map((keyword) =>
+  normalizeForSearch(keyword)
+);
+const BANK_FINANCE_KEYWORDS_NORMALIZED = BANK_FINANCE_KEYWORDS.map((keyword) =>
+  normalizeForSearch(keyword)
+);
+
+const CATEGORY_KEYWORDS_NORMALIZED = Object.fromEntries(
+  Object.entries(CATEGORY_KEYWORDS).map(([slug, keywords]) => [
+    slug,
+    [...new Set(keywords.map((keyword) => normalizeForSearch(keyword)).filter(Boolean))],
+  ])
+);
+
+function getItemSearchText(item) {
+  return normalizeForSearch(`${item?.title ?? ''} ${item?.excerpt ?? ''}`);
+}
+
+function includesKeyword(text, keyword) {
+  if (!keyword) {
+    return false;
+  }
+
+  if (keyword.includes(' ')) {
+    return text.includes(keyword);
+  }
+
+  return text.split(/\s+/).includes(keyword);
+}
+
+function includesAnyKeyword(text, keywords) {
+  return keywords.some((keyword) => includesKeyword(text, keyword));
+}
+
+function isRelevantForPeru(item) {
+  const text = getItemSearchText(item);
+  if (!text) {
+    return false;
+  }
+
+  if (includesAnyKeyword(text, EXCLUDED_KEYWORDS_PERU_NORMALIZED)) {
+    return false;
+  }
+
+  return includesAnyKeyword(text, RELEVANT_KEYWORDS_PERU_NORMALIZED);
+}
+
+function getScore(item) {
+  const text = getItemSearchText(item);
+  let score = 0;
+
+  if (isRelevantForPeru(item)) {
+    score += 5;
+  }
+
+  if (includesAnyKeyword(text, DOLLAR_RELEVANT_KEYWORDS_NORMALIZED)) {
+    score += 3;
+  }
+
+  if (includesKeyword(text, 'peru')) {
+    score += 2;
+  }
+
+  if (includesAnyKeyword(text, BANK_FINANCE_KEYWORDS_NORMALIZED)) {
+    score += 2;
+  }
+
+  return score;
+}
+
+function removeSimilarTitles(items) {
+  const seenFingerprints = new Set();
+  const uniqueItems = [];
+
+  for (const item of items) {
+    const normalizedTitle = normalizeForSearch(item.title);
+    const fingerprint = normalizedTitle
+      .split(/\s+/)
+      .filter((token) => token.length >= 4 && !STOPWORDS.has(token))
+      .slice(0, 8)
+      .join('|') || normalizedTitle;
+
+    if (seenFingerprints.has(fingerprint)) {
+      continue;
+    }
+
+    seenFingerprints.add(fingerprint);
+    uniqueItems.push(item);
+  }
+
+  return uniqueItems;
 }
 
 function readTimeMinutes(text) {
@@ -209,6 +425,79 @@ function buildAnalysisText(item, categorySlug, source) {
   ].join(' ');
 }
 
+function normalizeSourceUrl(url) {
+  const raw = String(url ?? '').trim();
+  if (!raw) {
+    return '';
+  }
+
+  try {
+    const parsed = new URL(raw);
+    parsed.hash = '';
+
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (TRACKING_QUERY_KEYS.has(key.toLowerCase())) {
+        parsed.searchParams.delete(key);
+      }
+    }
+
+    const sorted = [...parsed.searchParams.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]));
+
+    parsed.search = '';
+    for (const [key, value] of sorted) {
+      parsed.searchParams.append(key, value);
+    }
+
+    return parsed.toString();
+  } catch {
+    return raw;
+  }
+}
+
+function isHighQualityItem(item) {
+  const title = sanitizeText(item.title);
+  const excerpt = sanitizeText(item.excerpt);
+  const titleWords = title.split(/\s+/).filter(Boolean).length;
+
+  if (titleWords < 5 || title.length < 25) {
+    return false;
+  }
+
+  if (excerpt.length < 40) {
+    return false;
+  }
+
+  if (/^(video|galeria|fotogaleria)\b/i.test(title)) {
+    return false;
+  }
+
+  return true;
+}
+
+function dedupeRecordsInBatch(records) {
+  const seenSlugs = new Set();
+  const seenUrls = new Set();
+  const uniqueRecords = [];
+  let duplicates = 0;
+
+  for (const record of records) {
+    const keyUrl = record.source_url || '';
+    if (seenSlugs.has(record.slug) || (keyUrl && seenUrls.has(keyUrl))) {
+      duplicates += 1;
+      continue;
+    }
+
+    seenSlugs.add(record.slug);
+    if (keyUrl) {
+      seenUrls.add(keyUrl);
+    }
+    uniqueRecords.push(record);
+  }
+
+  return { uniqueRecords, duplicates };
+}
+
 function extractItemsFromRss(xml) {
   const itemMatches = [...String(xml).matchAll(/<item\b[\s\S]*?<\/item>/gi)];
 
@@ -251,9 +540,19 @@ async function fetchFeed(feed) {
     }
 
     const xml = await response.text();
-    const items = extractItemsFromRss(xml)
+    const items = removeSimilarTitles(
+      extractItemsFromRss(xml)
       .filter((item) => item.title && item.link)
-      .slice(0, maxPerFeed);
+      .filter((item) => isHighQualityItem(item))
+      .filter((item) => isRelevantForPeru(item))
+      .sort((a, b) => {
+        const scoreDiff = getScore(b) - getScore(a);
+        if (scoreDiff !== 0) {
+          return scoreDiff;
+        }
+        return sanitizeText(a.title).localeCompare(sanitizeText(b.title));
+      })
+    ).slice(0, maxPerFeed);
 
     return items;
   } finally {
@@ -278,16 +577,44 @@ async function fetchCategoriesMap() {
 }
 
 function detectCategorySlug(item, availableSlugs) {
-  const text = `${item.title} ${item.excerpt}`.toLowerCase();
+  const text = normalizeForSearch(`${item.title} ${item.excerpt}`);
+  const tokenSet = new Set(text.split(/\s+/).filter(Boolean));
+  let bestSlug = null;
+  let bestScore = 0;
 
-  for (const [slug, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
+  for (const [slug, keywords] of Object.entries(CATEGORY_KEYWORDS_NORMALIZED)) {
     if (!availableSlugs.has(slug)) {
       continue;
     }
 
-    if (keywords.some((keyword) => text.includes(keyword))) {
-      return slug;
+    let score = 0;
+    for (const keyword of keywords) {
+      if (!keyword) {
+        continue;
+      }
+
+      if (keyword.includes(' ')) {
+        if (text.includes(keyword)) {
+          score += 4;
+        }
+        continue;
+      }
+
+      if (tokenSet.has(keyword)) {
+        score += 3;
+      } else if (text.includes(keyword)) {
+        score += 1;
+      }
     }
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestSlug = slug;
+    }
+  }
+
+  if (bestSlug && bestScore > 0) {
+    return bestSlug;
   }
 
   if (availableSlugs.has('economia')) {
@@ -299,7 +626,8 @@ function detectCategorySlug(item, availableSlugs) {
 
 function buildArticleRecord(item, categoryId, categorySlug, source) {
   const baseSlug = slugify(item.title).slice(0, 80) || 'noticia';
-  const uniq = stableHash(item.link || item.title).slice(0, 8);
+  const normalizedSourceUrl = normalizeSourceUrl(item.link);
+  const uniq = stableHash(normalizedSourceUrl || item.title).slice(0, 8);
   const slug = `${baseSlug}-${uniq}`;
 
   const bodyText = `${item.excerpt} ${item.bodyHtml}`;
@@ -329,7 +657,7 @@ function buildArticleRecord(item, categoryId, categorySlug, source) {
     is_published: false,
     published_at: publishedAt,
     source_name: source,
-    source_url: item.link,
+    source_url: normalizedSourceUrl,
     source_type: 'media',
     source_published_at: publishedAt,
   };
@@ -389,9 +717,16 @@ async function filterExistingArticles(records) {
   const urlSet = await fetchExistingValues('source_url', sourceUrls);
   const slugSet = await fetchExistingValues('slug', slugs);
 
-  return records.filter(
-    (record) => !urlSet.has(record.source_url) && !slugSet.has(record.slug)
-  );
+  let duplicatesFromDb = 0;
+  const newRecords = records.filter((record) => {
+    const exists = urlSet.has(record.source_url) || slugSet.has(record.slug);
+    if (exists) {
+      duplicatesFromDb += 1;
+    }
+    return !exists;
+  });
+
+  return { newRecords, duplicatesFromDb };
 }
 
 export async function runCycle() {
@@ -439,11 +774,15 @@ export async function runCycle() {
         continue;
       }
 
-      const newRecords = await filterExistingArticles(records);
+      const { uniqueRecords, duplicates: duplicatesInBatch } = dedupeRecordsInBatch(records);
+      const { newRecords, duplicatesFromDb } = await filterExistingArticles(uniqueRecords);
+      const duplicateCount = duplicatesInBatch + duplicatesFromDb;
 
       if (newRecords.length === 0) {
         skipped += records.length;
-        console.log(`[news] ${feed.source} | leidas=${items.length} insertadas=0`);
+        console.log(
+          `[news] ${feed.source} | leidas=${items.length} insertadas=0 duplicadas=${duplicateCount}`
+        );
         continue;
       }
 
@@ -462,7 +801,7 @@ export async function runCycle() {
       skipped += Math.max(0, records.length - (data?.length ?? 0));
 
       console.log(
-        `[news] ${feed.source} | leidas=${items.length} insertadas=${data?.length ?? 0}`
+        `[news] ${feed.source} | leidas=${items.length} insertadas=${data?.length ?? 0} duplicadas=${duplicateCount}`
       );
     } catch (error) {
       console.error(`[news] error en feed ${feed.url}:`, error.message);
