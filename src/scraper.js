@@ -1,6 +1,9 @@
 import { supabase } from './supabase.js';
 const timeoutMs = Number(process.env.SCRAPER_REQUEST_TIMEOUT_MS ?? 15000);
 const maxPerFeed = Number(process.env.NEWS_MAX_PER_FEED ?? 6);
+const maxAgeDays = Number.isFinite(Number(process.env.NEWS_MAX_AGE_DAYS))
+  ? Math.max(0, Number(process.env.NEWS_MAX_AGE_DAYS))
+  : 0;
 const runOnceDaily = process.env.NEWS_RUN_ONCE_DAILY === 'true';
 const forceRun = process.env.NEWS_FORCE_RUN === '1';
 const TRACKING_QUERY_KEYS = new Set([
@@ -498,6 +501,59 @@ function dedupeRecordsInBatch(records) {
   return { uniqueRecords, duplicates };
 }
 
+function dayKeyInLima(date) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Lima',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+
+  const year = parts.find((part) => part.type === 'year')?.value;
+  const month = parts.find((part) => part.type === 'month')?.value;
+  const day = parts.find((part) => part.type === 'day')?.value;
+
+  if (!year || !month || !day) {
+    return null;
+  }
+
+  return `${year}-${month}-${day}`;
+}
+
+function dayIndexFromKey(dayKey) {
+  const [year, month, day] = String(dayKey).split('-').map(Number);
+  if (!year || !month || !day) {
+    return null;
+  }
+  return Math.floor(Date.UTC(year, month - 1, day) / 86400000);
+}
+
+function isFreshByPublishedDate(sourcePublishedAt) {
+  if (!sourcePublishedAt) {
+    return false;
+  }
+
+  const publishedDate = new Date(sourcePublishedAt);
+  if (Number.isNaN(publishedDate.getTime())) {
+    return false;
+  }
+
+  const todayKey = dayKeyInLima(new Date());
+  const publishedKey = dayKeyInLima(publishedDate);
+  if (!todayKey || !publishedKey) {
+    return false;
+  }
+
+  const todayIndex = dayIndexFromKey(todayKey);
+  const publishedIndex = dayIndexFromKey(publishedKey);
+  if (todayIndex == null || publishedIndex == null) {
+    return false;
+  }
+
+  const diffDays = todayIndex - publishedIndex;
+  return diffDays >= 0 && diffDays <= maxAgeDays;
+}
+
 function extractItemsFromRss(xml) {
   const itemMatches = [...String(xml).matchAll(/<item\b[\s\S]*?<\/item>/gi)];
 
@@ -543,6 +599,7 @@ async function fetchFeed(feed) {
     const items = removeSimilarTitles(
       extractItemsFromRss(xml)
       .filter((item) => item.title && item.link)
+      .filter((item) => isFreshByPublishedDate(item.sourcePublishedAt))
       .filter((item) => isHighQualityItem(item))
       .filter((item) => isRelevantForPeru(item))
       .sort((a, b) => {
