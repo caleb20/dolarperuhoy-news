@@ -304,6 +304,19 @@ function includesAnyKeyword(text, keywords) {
   return keywords.some((keyword) => includesKeyword(text, keyword));
 }
 
+function titleFingerprint(value) {
+  const normalizedTitle = normalizeForSearch(value);
+  if (!normalizedTitle) {
+    return '';
+  }
+
+  return normalizedTitle
+    .split(/\s+/)
+    .filter((token) => token.length >= 4 && !STOPWORDS.has(token))
+    .slice(0, 10)
+    .join('|') || normalizedTitle;
+}
+
 function isRelevantForPeru(item) {
   const text = getItemSearchText(item);
   if (!text) {
@@ -345,12 +358,7 @@ function removeSimilarTitles(items) {
   const uniqueItems = [];
 
   for (const item of items) {
-    const normalizedTitle = normalizeForSearch(item.title);
-    const fingerprint = normalizedTitle
-      .split(/\s+/)
-      .filter((token) => token.length >= 4 && !STOPWORDS.has(token))
-      .slice(0, 8)
-      .join('|') || normalizedTitle;
+    const fingerprint = titleFingerprint(item.title);
 
     if (seenFingerprints.has(fingerprint)) {
       continue;
@@ -762,7 +770,63 @@ async function fetchExistingValues(field, values) {
   return set;
 }
 
-async function filterExistingArticles(records) {
+async function fetchRecentTitleFingerprints() {
+  const lookbackDays = Number.isFinite(Number(process.env.NEWS_DEDUPE_LOOKBACK_DAYS))
+    ? Math.max(1, Number(process.env.NEWS_DEDUPE_LOOKBACK_DAYS))
+    : 3;
+
+  const since = new Date(Date.now() - lookbackDays * 86400000).toISOString();
+
+  const { data, error } = await supabase
+    .from('news_articles')
+    .select('title')
+    .gte('created_at', since)
+    .limit(1200);
+
+  if (error) {
+    throw new Error(`No se pudo leer titulos recientes: ${error.message}`);
+  }
+
+  const seenFingerprints = new Set();
+  for (const row of data ?? []) {
+    const fingerprint = titleFingerprint(row?.title);
+    if (fingerprint) {
+      seenFingerprints.add(fingerprint);
+    }
+  }
+
+  return seenFingerprints;
+}
+
+function dedupeRecordsAgainstCycle(records, seenCycleUrls, seenCycleTitleFingerprints) {
+  const uniqueRecords = [];
+  let duplicates = 0;
+
+  for (const record of records) {
+    const url = record.source_url || '';
+    const fingerprint = titleFingerprint(record.title);
+
+    const existsInCycle = (url && seenCycleUrls.has(url)) || (fingerprint && seenCycleTitleFingerprints.has(fingerprint));
+
+    if (existsInCycle) {
+      duplicates += 1;
+      continue;
+    }
+
+    if (url) {
+      seenCycleUrls.add(url);
+    }
+    if (fingerprint) {
+      seenCycleTitleFingerprints.add(fingerprint);
+    }
+
+    uniqueRecords.push(record);
+  }
+
+  return { uniqueRecords, duplicates };
+}
+
+async function filterExistingArticles(records, recentTitleFingerprints) {
   const sourceUrls = records
     .map((record) => record.source_url)
     .filter(Boolean);
@@ -776,11 +840,22 @@ async function filterExistingArticles(records) {
 
   let duplicatesFromDb = 0;
   const newRecords = records.filter((record) => {
-    const exists = urlSet.has(record.source_url) || slugSet.has(record.slug);
+    const recordTitleFingerprint = titleFingerprint(record.title);
+    const exists =
+      urlSet.has(record.source_url) ||
+      slugSet.has(record.slug) ||
+      (recordTitleFingerprint && recentTitleFingerprints.has(recordTitleFingerprint));
+
     if (exists) {
       duplicatesFromDb += 1;
+      return false;
     }
-    return !exists;
+
+    if (recordTitleFingerprint) {
+      recentTitleFingerprints.add(recordTitleFingerprint);
+    }
+
+    return true;
   });
 
   return { newRecords, duplicatesFromDb };
@@ -807,6 +882,9 @@ export async function runCycle() {
   let fetched = 0;
   let inserted = 0;
   let skipped = 0;
+  const seenCycleUrls = new Set();
+  const seenCycleTitleFingerprints = new Set();
+  const recentTitleFingerprints = await fetchRecentTitleFingerprints();
 
   for (const feed of FEEDS) {
     try {
@@ -832,8 +910,16 @@ export async function runCycle() {
       }
 
       const { uniqueRecords, duplicates: duplicatesInBatch } = dedupeRecordsInBatch(records);
-      const { newRecords, duplicatesFromDb } = await filterExistingArticles(uniqueRecords);
-      const duplicateCount = duplicatesInBatch + duplicatesFromDb;
+      const { uniqueRecords: uniqueRecordsInCycle, duplicates: duplicatesInCycle } = dedupeRecordsAgainstCycle(
+        uniqueRecords,
+        seenCycleUrls,
+        seenCycleTitleFingerprints
+      );
+      const { newRecords, duplicatesFromDb } = await filterExistingArticles(
+        uniqueRecordsInCycle,
+        recentTitleFingerprints
+      );
+      const duplicateCount = duplicatesInBatch + duplicatesInCycle + duplicatesFromDb;
 
       if (newRecords.length === 0) {
         skipped += records.length;
