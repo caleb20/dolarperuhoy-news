@@ -4,8 +4,6 @@ const maxPerFeed = Number(process.env.NEWS_MAX_PER_FEED ?? 6);
 const maxAgeDays = Number.isFinite(Number(process.env.NEWS_MAX_AGE_DAYS))
   ? Math.max(0, Number(process.env.NEWS_MAX_AGE_DAYS))
   : 0;
-const runOnceDaily = process.env.NEWS_RUN_ONCE_DAILY === 'true';
-const forceRun = process.env.NEWS_FORCE_RUN === '1';
 const TRACKING_QUERY_KEYS = new Set([
   'utm_source',
   'utm_medium',
@@ -728,24 +726,6 @@ function buildArticleRecord(item, categoryId, categorySlug, source) {
   };
 }
 
-async function alreadyRanToday() {
-  const start = new Date();
-  start.setUTCHours(0, 0, 0, 0);
-
-  const { data, error } = await supabase
-    .from('news_articles')
-    .select('id')
-    .ilike('author_name', 'Redaccion %')
-    .gte('created_at', start.toISOString())
-    .limit(1);
-
-  if (error) {
-    throw new Error(`No se pudo validar corrida diaria: ${error.message}`);
-  }
-
-  return (data?.length ?? 0) > 0;
-}
-
 async function fetchExistingValues(field, values) {
   if (values.length === 0) {
     return new Set();
@@ -863,14 +843,6 @@ async function filterExistingArticles(records, recentTitleFingerprints) {
 
 export async function runCycle() {
   console.log(`[news] ciclo iniciado: ${new Date().toISOString()}`);
-
-  if (runOnceDaily && !forceRun) {
-    const hasRun = await alreadyRanToday();
-    if (hasRun) {
-      console.log('[news] ya se ejecuto hoy, se omite corrida diaria');
-      return { feeds: FEEDS.length, fetched: 0, inserted: 0, skipped: 0 };
-    }
-  }
 
   const categoryMap = await fetchCategoriesMap();
 
