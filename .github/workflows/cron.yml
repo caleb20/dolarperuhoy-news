@@ -32,3 +32,4 @@ jobs:
           SCRAPER_SUPABASE_KEY: ${{ secrets.SCRAPER_SUPABASE_KEY }}
           SCRAPER_REQUEST_TIMEOUT_MS: 15000
           NEWS_MAX_PER_FEED: 10
+          NEWS_MAX_AGE_DAYS: 2

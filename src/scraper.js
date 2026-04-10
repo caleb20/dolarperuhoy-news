@@ -3,7 +3,7 @@ const timeoutMs = Number(process.env.SCRAPER_REQUEST_TIMEOUT_MS ?? 15000);
 const maxPerFeed = Number(process.env.NEWS_MAX_PER_FEED ?? 6);
 const maxAgeDays = Number.isFinite(Number(process.env.NEWS_MAX_AGE_DAYS))
   ? Math.max(0, Number(process.env.NEWS_MAX_AGE_DAYS))
-  : 0;
+  : 2;
 const TRACKING_QUERY_KEYS = new Set([
   'utm_source',
   'utm_medium',
@@ -38,19 +38,7 @@ const BASE_FEEDS = [
   },
   {
     source: 'Andina',
-    url: 'https://andina.pe/agencia/rssnoticias.aspx',
-  },
-  {
-    source: 'Andina',
-    url: 'https://andina.pe/agencia/rsseconomia.aspx',
-  },
-  {
-    source: 'Andina',
-    url: 'https://andina.pe/agencia/rsspolitica.aspx',
-  },
-  {
-    source: 'Andina',
-    url: 'https://andina.pe/agencia/rssdeportes.aspx',
+    url: 'https://andina.pe/agencia/rss.aspx',
   },
   {
     source: 'RPP',
@@ -878,6 +866,7 @@ export async function runCycle() {
         .filter(Boolean);
 
       if (records.length === 0) {
+        console.log(`[news] ${feed.source} | leidas=${items.length} insertadas=0 duplicadas=0`);
         continue;
       }
 
