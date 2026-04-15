@@ -1,9 +1,7 @@
 import { supabase } from './supabase.js';
 const timeoutMs = Number(process.env.SCRAPER_REQUEST_TIMEOUT_MS ?? 15000);
 const maxPerFeed = Number(process.env.NEWS_MAX_PER_FEED ?? 6);
-const maxAgeDays = Number.isFinite(Number(process.env.NEWS_MAX_AGE_DAYS))
-  ? Math.max(0, Number(process.env.NEWS_MAX_AGE_DAYS))
-  : 2;
+const maxAgeDays = 0; // Solo noticias del día de hoy
 const TRACKING_QUERY_KEYS = new Set([
   'utm_source',
   'utm_medium',
