@@ -231,6 +231,28 @@ const EXCLUDED_KEYWORDS_PERU = [
   'opinion',
   'editorial',
   'efemerides',
+  // Exclusión de Argentina y cartelera de cines
+  'argentina',
+  'buenos aires',
+  'rosario',
+  'cordoba',
+  'cartelera',
+  'cine',
+  'pelicula',
+  'película',
+  'estreno',
+  'actor',
+  'actriz',
+  'director',
+  'festival de cine',
+  'taquilla',
+  'hollywood',
+  'netflix',
+  'disney',
+  'hbo',
+  'prime video',
+  'series',
+  'telenovela',
 ];
 
 const DOLLAR_RELEVANT_KEYWORDS = ['dolar', 'tipo de cambio'];
@@ -571,6 +593,56 @@ function extractItemsFromRss(xml) {
   });
 }
 
+import * as cheerio from 'cheerio';
+
+async function fetchAndinaFullContent(url) {
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'user-agent': 'Mozilla/5.0 (compatible; DolarPeruHoyNewsBot/1.0)',
+      },
+    });
+    if (!response.ok) return null;
+    const html = await response.text();
+    const $ = cheerio.load(html);
+    // Selecciona el contenido principal de la noticia
+    const main = $('.columna.linknotas');
+    if (!main.length) return null;
+    // Elimina bloques de redes sociales, publicidad, scripts y enlaces internos
+    main.find('.iconredes, script, .Top3, #taboola-below-andina-thumbnails, .twitter-tweet, .trc_related_container').remove();
+    // Elimina enlaces a otras noticias de Andina (clase ApplyClass o href con /noticia-)
+    main.find('a.ApplyClass, a[href*="/noticia-"]').remove();
+    // Elimina bloques que contienen 'Más en Andina'
+    main.find('*').filter((i, el) => {
+      return $(el).text().trim().toLowerCase().startsWith('más en andina');
+    }).remove();
+    // Extra: elimina bloques con solo (FIN) o créditos
+    main.find('*').filter((i, el) => {
+      const t = $(el).text().trim();
+      return t === '(FIN)' || t.startsWith('(FIN)');
+    }).remove();
+    // Elimina divs vacíos o con solo saltos de línea/espacios
+    main.find('div').filter((i, el) => {
+      const html = $(el).html() || '';
+      const text = $(el).text().replace(/\s+/g, '');
+      return !text || /^<br\s*\/?>(<br\s*\/?\s*>)*$/.test(html.trim());
+    }).remove();
+    // Elimina bloques de barra social aunque estén vacíos
+    main.find('div[class*="barra-social"], div[class*="redes"], div[class*="social"]').remove();
+    // Extrae el HTML limpio
+    let content = main.html() || '';
+    // Limpia saltos de línea y espacios redundantes
+    content = content.replace(/(<br\s*\/?>\s*){2,}/gi, '<br>');
+    content = content.replace(/\n{2,}/g, '\n');
+    content = content.replace(/\s{3,}/g, ' ');
+    // Opcional: elimina saltos de línea al inicio y fin
+    content = content.replace(/^(<br\s*\/?>|\s)+/, '').replace(/(<br\s*\/?>|\s)+$/, '');
+    return content.trim();
+  } catch {
+    return null;
+  }
+}
+
 async function fetchFeed(feed) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -588,8 +660,7 @@ async function fetchFeed(feed) {
     }
 
     const xml = await response.text();
-    const items = removeSimilarTitles(
-      extractItemsFromRss(xml)
+    let items = extractItemsFromRss(xml)
       .filter((item) => item.title && item.link)
       .filter((item) => isFreshByPublishedDate(item.sourcePublishedAt))
       .filter((item) => isHighQualityItem(item))
@@ -600,9 +671,19 @@ async function fetchFeed(feed) {
           return scoreDiff;
         }
         return sanitizeText(a.title).localeCompare(sanitizeText(b.title));
-      })
-    ).slice(0, maxPerFeed);
+      });
 
+    // Si la fuente es Andina, intenta obtener el contenido completo
+    if (feed.source === 'Andina') {
+      for (const item of items) {
+        const fullHtml = await fetchAndinaFullContent(item.link);
+        if (fullHtml) {
+          item.bodyHtml = fullHtml;
+        }
+      }
+    }
+
+    items = removeSimilarTitles(items).slice(0, maxPerFeed);
     return items;
   } finally {
     clearTimeout(timeout);
