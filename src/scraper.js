@@ -1,7 +1,7 @@
 import { supabase } from './supabase.js';
 const timeoutMs = Number(process.env.SCRAPER_REQUEST_TIMEOUT_MS ?? 15000);
 const maxPerFeed = Number(process.env.NEWS_MAX_PER_FEED ?? 6);
-const maxAgeDays = 0; // Solo noticias del día de hoy
+const maxAgeDays = 0; // Noticias de hoy
 const TRACKING_QUERY_KEYS = new Set([
   'utm_source',
   'utm_medium',
@@ -660,18 +660,22 @@ async function fetchFeed(feed) {
     }
 
     const xml = await response.text();
-    let items = extractItemsFromRss(xml)
-      .filter((item) => item.title && item.link)
-      .filter((item) => isFreshByPublishedDate(item.sourcePublishedAt))
-      .filter((item) => isHighQualityItem(item))
-      .filter((item) => isRelevantForPeru(item))
-      .sort((a, b) => {
-        const scoreDiff = getScore(b) - getScore(a);
-        if (scoreDiff !== 0) {
-          return scoreDiff;
-        }
-        return sanitizeText(a.title).localeCompare(sanitizeText(b.title));
-      });
+    let rawItems = extractItemsFromRss(xml);
+    let items = [];
+    for (const item of rawItems) {
+      if (!item.title || !item.link) continue;
+      if (!isFreshByPublishedDate(item.sourcePublishedAt)) continue;
+      if (!isHighQualityItem(item)) continue;
+      if (!isRelevantForPeru(item)) continue;
+      items.push(item);
+    }
+    items = items.sort((a, b) => {
+      const scoreDiff = getScore(b) - getScore(a);
+      if (scoreDiff !== 0) {
+        return scoreDiff;
+      }
+      return sanitizeText(a.title).localeCompare(sanitizeText(b.title));
+    });
 
     // Si la fuente es Andina, intenta obtener el contenido completo
     if (feed.source === 'Andina') {
