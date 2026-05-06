@@ -1,7 +1,34 @@
 import { supabase } from './supabase.js';
+import * as cheerio from 'cheerio';
+import {
+  hasOpenAiCredentials,
+  isAiPipelineEnabled,
+  rewriteAndAuditArticle,
+  selectBestArticles,
+} from './ai.js';
 const timeoutMs = Number(process.env.SCRAPER_REQUEST_TIMEOUT_MS ?? 15000);
 const maxPerFeed = Number(process.env.NEWS_MAX_PER_FEED ?? 6);
-const maxAgeDays = 0; // Noticias de hoy
+const maxAgeDays = 0; // Noticias del mismo día, se asume que el feed se actualiza al menos una vez al día
+const MAX_AI_ARTICLES_PER_RUN = 6;
+
+// Google Ads compliance: detectar y rechazar clickbait
+const CLICKBAIT_INDICATORS = [
+  /\b(increíble|asombroso|shocking|nunca|jamás|siempre|CRASH|EXPLOSION|BOMBA)\b/gi,
+  /\?{2,}/g,
+  /(!){3,}/g,
+];
+
+function isClickbait(text) {
+  for (const pattern of CLICKBAIT_INDICATORS) {
+    if (pattern.test(text)) {
+      return true;
+    }
+  }
+  return false;
+}
+const fullScrapeEnabled = !['0', 'false', 'no', 'off'].includes(
+  String(process.env.NEWS_FULL_SCRAPE_ENABLED ?? 'true').trim().toLowerCase()
+);
 const TRACKING_QUERY_KEYS = new Set([
   'utm_source',
   'utm_medium',
@@ -177,6 +204,15 @@ function sanitizeText(text) {
     .replaceAll(/&#39;/gi, "'")
     .replaceAll(/\s+/g, ' ')
     .trim();
+}
+
+function escapeHtml(text) {
+  return String(text ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 }
 
 function firstMatch(text, regex) {
@@ -452,7 +488,7 @@ function normalizeSourceUrl(url) {
     const parsed = new URL(raw);
     parsed.hash = '';
 
-    for (const key of [...parsed.searchParams.keys()]) {
+    for (const key of parsed.searchParams.keys()) {
       if (TRACKING_QUERY_KEYS.has(key.toLowerCase())) {
         parsed.searchParams.delete(key);
       }
@@ -593,7 +629,81 @@ function extractItemsFromRss(xml) {
   });
 }
 
-import * as cheerio from 'cheerio';
+function buildParagraphHtmlFromText(paragraphs) {
+  return paragraphs
+    .map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`)
+    .join('\n')
+    .trim();
+}
+
+async function fetchGenericFullContent(url) {
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'user-agent': 'Mozilla/5.0 (compatible; DolarPeruHoyNewsBot/1.0)',
+      },
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const html = await response.text();
+    const $ = cheerio.load(html);
+
+    $('script, style, noscript, nav, footer, header, aside, form, iframe').remove();
+
+    const candidates = [
+      'article',
+      'main article',
+      'main',
+      '.article-body',
+      '.post-content',
+      '.entry-content',
+      '.story-body',
+      '[itemprop="articleBody"]',
+    ];
+
+    let bestParagraphs = [];
+
+    for (const selector of candidates) {
+      const node = $(selector).first();
+      if (!node.length) {
+        continue;
+      }
+
+      const paragraphs = node
+        .find('p')
+        .toArray()
+        .map((el) => sanitizeText($(el).text()))
+        .filter((text) => text.length >= 50);
+
+      if (paragraphs.length > bestParagraphs.length) {
+        bestParagraphs = paragraphs;
+      }
+
+      if (bestParagraphs.length >= 4) {
+        break;
+      }
+    }
+
+    if (bestParagraphs.length < 2) {
+      bestParagraphs = $('p')
+        .toArray()
+        .map((el) => sanitizeText($(el).text()))
+        .filter((text) => text.length >= 60)
+        .slice(0, 8);
+    }
+
+    if (bestParagraphs.length < 2 || bestParagraphs.join(' ').length < 350) {
+      return null;
+    }
+
+    return buildParagraphHtmlFromText(bestParagraphs.slice(0, 10));
+  } catch {
+    return null;
+  }
+}
 
 async function fetchAndinaFullContent(url) {
   try {
@@ -624,7 +734,7 @@ async function fetchAndinaFullContent(url) {
     // Elimina divs vacíos o con solo saltos de línea/espacios
     main.find('div').filter((i, el) => {
       const html = $(el).html() || '';
-      const text = $(el).text().replace(/\s+/g, '');
+      const text = $(el).text().replaceAll(/\s+/g, '');
       return !text || /^<br\s*\/?>(<br\s*\/?\s*>)*$/.test(html.trim());
     }).remove();
     // Elimina bloques de barra social aunque estén vacíos
@@ -632,9 +742,9 @@ async function fetchAndinaFullContent(url) {
     // Extrae el HTML limpio
     let content = main.html() || '';
     // Limpia saltos de línea y espacios redundantes
-    content = content.replace(/(<br\s*\/?>\s*){2,}/gi, '<br>');
-    content = content.replace(/\n{2,}/g, '\n');
-    content = content.replace(/\s{3,}/g, ' ');
+    content = content.replaceAll(/(<br\s*\/?>\s*){2,}/gi, '<br>');
+    content = content.replaceAll(/\n{2,}/g, '\n');
+    content = content.replaceAll(/\s{3,}/g, ' ');
     // Opcional: elimina saltos de línea al inicio y fin
     content = content.replace(/^(<br\s*\/?>|\s)+/, '').replace(/(<br\s*\/?>|\s)+$/, '');
     return content.trim();
@@ -677,10 +787,18 @@ async function fetchFeed(feed) {
       return sanitizeText(a.title).localeCompare(sanitizeText(b.title));
     });
 
-    // Si la fuente es Andina, intenta obtener el contenido completo
-    if (feed.source === 'Andina') {
+    if (fullScrapeEnabled && feed.source === 'Andina') {
       for (const item of items) {
         const fullHtml = await fetchAndinaFullContent(item.link);
+        if (fullHtml) {
+          item.bodyHtml = fullHtml;
+        }
+      }
+    }
+
+    if (fullScrapeEnabled && feed.source !== 'Andina') {
+      for (const item of items) {
+        const fullHtml = await fetchGenericFullContent(item.link);
         if (fullHtml) {
           item.bodyHtml = fullHtml;
         }
@@ -789,7 +907,8 @@ function buildArticleRecord(item, categoryId, categorySlug, source) {
     seo_title: item.title,
     seo_description: item.excerpt.slice(0, 160),
     is_published: false,
-    published_at: publishedAt,
+    review_status: 'pending_review',
+    published_at: null,
     source_name: source,
     source_url: normalizedSourceUrl,
     source_type: 'media',
@@ -912,6 +1031,129 @@ async function filterExistingArticles(records, recentTitleFingerprints) {
   return { newRecords, duplicatesFromDb };
 }
 
+function mergeTags(baseTags, aiTags) {
+  return [...new Set([...(baseTags ?? []), ...(aiTags ?? [])])]
+    .map((tag) => sanitizeText(tag).toLowerCase())
+    .filter(Boolean)
+    .slice(0, 12);
+}
+
+function buildSelectionInput(record) {
+  return {
+    id: record.slug,
+    title: record.title,
+    excerpt: record.excerpt,
+    source: record.source_name,
+    date: record.source_published_at,
+  };
+}
+
+function detectIsDollarArticle(item) {
+  const searchText = getItemSearchText(item);
+  for (const keyword of DOLLAR_RELEVANT_KEYWORDS_NORMALIZED) {
+    if (searchText.includes(keyword)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function runAiPublishingPipeline(selectedRecords) {
+  const result = {
+    selected: selectedRecords.length,
+    edited: 0,
+    discardedAfterEdit: 0,
+    published: 0,
+    skipped: 0,
+  };
+
+  if (selectedRecords.length === 0) {
+    return result;
+  }
+
+  const recordsToPublish = [];
+  let dolarFeaturedAlreadySet = false;
+
+  for (const draft of selectedRecords) {
+    try {
+        // Rechazo preventivo: detectar clickbait
+        if (isClickbait(draft.title)) {
+          result.discardedAfterEdit += 1;
+          console.log(`[news] Rechazado por clickbait: ${draft.title.slice(0, 60)}`);
+          continue;
+        }
+
+      // Etapa editorial completa: valida calidad y reescribe con estructura SEO.
+      const edited = await rewriteAndAuditArticle({
+        id: draft.slug,
+        ...draft,
+      });
+
+      if (!edited.isValid) {
+        result.discardedAfterEdit += 1;
+          console.log(`[news] Rechazado por IA: ${edited.discardReason || 'validación fallida'}`);
+        continue;
+      }
+
+      result.edited += 1;
+
+      const isDollarArticle = detectIsDollarArticle(draft);
+      let shouldFeature = Boolean(edited.featured);
+
+      // Primera noticia apta de dólar se marca automáticamente como destacada
+      if (!dolarFeaturedAlreadySet && isDollarArticle && !shouldFeature) {
+        shouldFeature = true;
+        dolarFeaturedAlreadySet = true;
+        console.log(`[news] destacado automatico asignado a articulo de dolar: ${draft.title.slice(0, 60)}`);
+      }
+
+      const editorialDisclaimer = [
+        '<p><em>Este artículo ha sido reescrito y editado por IA para mejorar claridad y estructura. ',
+        `Fuente original: ${draft.source_name}. `,
+        'Publicado por Equipo Editorial DolarPeruHoy.</em></p>\n\n',
+      ].join('');
+
+      recordsToPublish.push({
+        ...draft,
+        title: edited.title || draft.title,
+        slug: edited.slug || draft.slug,
+        excerpt: edited.excerpt || draft.excerpt,
+        body_html: editorialDisclaimer + (edited.bodyHtml || draft.body_html),
+        analysis_text: edited.analysisText || draft.analysis_text,
+        seo_title: edited.seoTitle || draft.seo_title || draft.title,
+        seo_description: edited.seoDescription || draft.seo_description || draft.excerpt,
+        tags: mergeTags(draft.tags, edited.tags),
+        read_time_minutes: Math.max(3, Number(edited.readTimeMinutes) || draft.read_time_minutes || 3),
+        featured: shouldFeature,
+        author_name: edited.authorName || 'Equipo Editorial DolarPeruHoy',
+        is_published: false,
+        review_status: 'pending_review',
+        published_at: null,
+      });
+    } catch (error) {
+      console.error(`[news] Edicion IA fallo en articulo ${draft.slug}:`, error.message);
+    }
+  }
+
+  if (recordsToPublish.length === 0) {
+    result.skipped = selectedRecords.length;
+    return result;
+  }
+
+  const { data, error } = await supabase
+    .from('news_articles')
+    .upsert(recordsToPublish, { onConflict: 'slug', ignoreDuplicates: true })
+    .select('id');
+
+  if (error) {
+    throw new Error(`Error guardando/publicando articulos seleccionados: ${error.message}`);
+  }
+
+  result.published = data?.length ?? recordsToPublish.length;
+  result.skipped += Math.max(0, selectedRecords.length - result.published);
+  return result;
+}
+
 export async function runCycle() {
   console.log(`[news] ciclo iniciado: ${new Date().toISOString()}`);
 
@@ -922,19 +1164,36 @@ export async function runCycle() {
     return { feeds: 0, fetched: 0, inserted: 0, skipped: 0 };
   }
 
+  if (!isAiPipelineEnabled()) {
+    console.log('[news] IA deshabilitada por NEWS_AI_ENABLED. No se publica contenido.');
+    return { feeds: FEEDS.length, fetched: 0, collected: 0, selected: 0, published: 0, skipped: 0 };
+  }
+
+  if (!hasOpenAiCredentials()) {
+    console.log('[news] falta OPENAI_API_KEY. Se cancela el ciclo para evitar guardar descartados sin seleccion IA.');
+    return { feeds: FEEDS.length, fetched: 0, collected: 0, selected: 0, published: 0, skipped: 0 };
+  }
+
   let fetched = 0;
   let inserted = 0;
   let skipped = 0;
+  let collected = 0;
+  let selected = 0;
+  let discardedBySelection = 0;
+  let published = 0;
+  let seoGenerated = 0;
+  let duplicatesTotal = 0;
   const seenCycleUrls = new Set();
   const seenCycleTitleFingerprints = new Set();
   const recentTitleFingerprints = await fetchRecentTitleFingerprints();
+  const allRecords = [];
+  const availableSlugs = new Set(categoryMap.keys());
 
   for (const feed of FEEDS) {
     try {
       const items = await fetchFeed(feed);
       fetched += items.length;
 
-      const availableSlugs = new Set(categoryMap.keys());
       const records = items
         .map((item) => {
           const categorySlug = detectCategorySlug(item, availableSlugs);
@@ -949,7 +1208,7 @@ export async function runCycle() {
         .filter(Boolean);
 
       if (records.length === 0) {
-        console.log(`[news] ${feed.source} | leidas=${items.length} insertadas=0 duplicadas=0`);
+        console.log(`[news] ${feed.source} | leidas=${items.length} candidatas=0 duplicadas=0`);
         continue;
       }
 
@@ -964,43 +1223,84 @@ export async function runCycle() {
         recentTitleFingerprints
       );
       const duplicateCount = duplicatesInBatch + duplicatesInCycle + duplicatesFromDb;
+      duplicatesTotal += duplicateCount;
 
-      if (newRecords.length === 0) {
-        skipped += records.length;
-        console.log(
-          `[news] ${feed.source} | leidas=${items.length} insertadas=0 duplicadas=${duplicateCount}`
-        );
-        continue;
-      }
+      allRecords.push(...newRecords);
+      collected += newRecords.length;
 
-      const { data, error } = await supabase
-        .from('news_articles')
-        .upsert(newRecords, { onConflict: 'slug', ignoreDuplicates: true })
-        .select('id');
-
-      if (error) {
-        console.error(`[news] error guardando ${feed.source}:`, error.message);
-        skipped += newRecords.length;
-        continue;
-      }
-
-      inserted += data?.length ?? 0;
-      skipped += Math.max(0, records.length - (data?.length ?? 0));
+      skipped += Math.max(0, records.length - newRecords.length);
 
       console.log(
-        `[news] ${feed.source} | leidas=${items.length} insertadas=${data?.length ?? 0} duplicadas=${duplicateCount}`
+        `[news] ${feed.source} | leidas=${items.length} candidatas=${newRecords.length} duplicadas=${duplicateCount}`
       );
     } catch (error) {
       console.error(`[news] error en feed ${feed.url}:`, error.message);
     }
   }
 
+  if (allRecords.length === 0) {
+    console.log('[news] ciclo terminado: sin candidatas tras limpieza y deduplicacion');
+    return {
+      feeds: FEEDS.length,
+      fetched,
+      collected: 0,
+      selected: 0,
+      discardedBySelection: 0,
+      duplicates: duplicatesTotal,
+      seoGenerated: 0,
+      inserted: 0,
+      published: 0,
+      skipped,
+    };
+  }
+
+  // Seleccion por lote para ahorrar tokens: una sola llamada IA para el conjunto completo.
+  const selection = await selectBestArticles(allRecords.map(buildSelectionInput));
+  const selectedSet = new Set(selection.selected.map((item) => item.id));
+  const selectedRecords = allRecords.filter((record) => selectedSet.has(record.slug));
+  selected = selectedRecords.length;
+  discardedBySelection = Math.max(0, allRecords.length - selected);
+
+  if (selectedRecords.length === 0) {
+    skipped += allRecords.length;
+    console.log(`[news] seleccion IA sin resultados. resumen=${JSON.stringify(selection.summary)}`);
+    return {
+      feeds: FEEDS.length,
+      fetched,
+      collected,
+      selected: 0,
+      discardedBySelection,
+      duplicates: duplicatesTotal,
+      seoGenerated: 0,
+      inserted: 0,
+      published: 0,
+      skipped,
+      selectionSummary: selection.summary,
+    };
+  }
+
+  // Limitar articulos procesados por IA para reducir costos
+  const recordsToProcess = selectedRecords.slice(0, MAX_AI_ARTICLES_PER_RUN);
+  const aiResult = await runAiPublishingPipeline(recordsToProcess);
+  seoGenerated = aiResult.edited;
+  inserted = aiResult.published;
+  published = aiResult.published;
+  skipped += aiResult.skipped + discardedBySelection + aiResult.discardedAfterEdit;
+
   console.log('[news] ciclo terminado');
 
   return {
     feeds: FEEDS.length,
     fetched,
+    collected,
+    selected,
+    discardedBySelection,
+    duplicates: duplicatesTotal,
+    seoGenerated,
+    discardedAfterEdit: aiResult.discardedAfterEdit,
     inserted,
+    published,
     skipped,
+    selectionSummary: selection.summary,
   };
 }
