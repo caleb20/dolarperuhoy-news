@@ -18,7 +18,8 @@ const openAiMaxOutputTokens = clamp(Number(process.env.OPENAI_MAX_OUTPUT_TOKENS 
 const selectionTimeoutMs = Number(process.env.OPENAI_SELECTION_TIMEOUT_MS ?? timeoutMs * 2);
 
 // Longitud mínima de impact_text exigida al modelo
-const IMPACT_TEXT_MIN_CHARS = clamp(Number(process.env.NEWS_IMPACT_TEXT_MIN_CHARS ?? 180), 80, 600);
+// 420 chars ≈ 80 palabras mínimas requeridas para impact_text con estructura completa
+const IMPACT_TEXT_MIN_CHARS = clamp(Number(process.env.NEWS_IMPACT_TEXT_MIN_CHARS ?? 420), 80, 600);
 const IMPACT_TEXT_MAX_CHARS = clamp(Number(process.env.NEWS_IMPACT_TEXT_MAX_CHARS ?? 520), 200, 1000);
 const ANALYSIS_TEXT_MIN_CHARS = clamp(Number(process.env.NEWS_ANALYSIS_TEXT_MIN_CHARS ?? 180), 80, 600);
 const ANALYSIS_TEXT_MAX_CHARS = clamp(Number(process.env.NEWS_ANALYSIS_TEXT_MAX_CHARS ?? 520), 200, 1000);
@@ -763,8 +764,20 @@ export async function rewriteAndAuditArticle(article) {
     '7. Varía la longitud de las oraciones: mezcla oraciones cortas con otras más largas para que fluya natural.',
 
     // CAMPOS ESPECIALES
-    `analysis_text: 2-3 oraciones explicando por qué esta noticia le importa al peruano de a pie. Empieza directo, sin "Este artículo analiza" ni frases similares.`,
-    `impact_text: 2-3 oraciones sobre el efecto concreto en Perú: precios, empleo, tipo de cambio o bolsillo del consumidor. Si es noticia internacional, explica la conexión real con Perú en una oración. Sin frases genéricas.`,
+    'analysis_text: 2-3 oraciones que expliquen directamente por qué esta noticia importa al peruano. Empieza con el hecho, no con "Este artículo analiza". Sin frases genéricas.',
+
+    // impact_text: instrucción detallada con ejemplos buenos/malos para forzar especificidad
+    'impact_text: Este es el campo MÁS IMPORTANTE del artículo. Escribe 3-5 oraciones con impacto CONCRETO y ESPECÍFICO en Perú.',
+    'ESTRUCTURA del impact_text:',
+    '  a) Efecto inmediato en el bolsillo: qué sube o baja de precio, cuánto, para quién.',
+    '  b) Efecto en un sector específico: importadores, exportadores, deudores en dólares, ahorristas, pensionistas AFP, empresas pymes.',
+    '  c) Qué hacer: una acción práctica que puede tomar el lector (revisar su deuda, esperar para cambiar dólares, comparar tasas).',
+    'EJEMPLOS de impact_text MALO vs BUENO:',
+    '  MALO: "El tipo de cambio impacta la economía peruana afectando precios y el bolsillo de los ciudadanos."',
+    '  BUENO: "Con el dólar en S/3.46, quienes tienen créditos hipotecarios en dólares pagan esta semana alrededor de S/17 menos por cada USD 100 de cuota respecto a cuando el dólar estaba en S/3.65 en marzo. Para los importadores de electrodomésticos y ropa, el margen mejora ligeramente. Si tienes dólares ahorrados y pensabas venderlos, esta semana no es el mejor momento: el sol está más fuerte de lo habitual."',
+    '  MALO: "Un dólar estable ayuda a contener la inflación."',
+    '  BUENO: "Un dólar que no sube frena el alza de precios en supermercados, especialmente en aceite, trigo y productos enlatados que Perú importa masivamente. El BCRP tiene margen para no subir tasas de interés este mes, lo que beneficia a quienes tienen créditos de consumo en soles."',
+    'LONGITUD mínima de impact_text: 80 palabras. Si la noticia es sobre dólar o tipo de cambio, llega a 100 palabras.',
 
     // ESTRUCTURA y FORMATO
     `Organiza el artículo en este orden: ${selectedStructure.join(' → ')}.`,
@@ -786,7 +799,8 @@ export async function rewriteAndAuditArticle(article) {
       'Subtítulos descriptivos y específicos',
       'Prohibido: "en el contexto actual", "cabe destacar", "es importante mencionar", "en resumen", "juega un papel fundamental"',
       'Párrafos cortos, una idea por párrafo',
-      'analysis_text e impact_text: concretos, sin frases de relleno, mínimo 2 oraciones cada uno',
+      'impact_text: mínimo 80 palabras, estructura (a) efecto en bolsillo con cifra o ejemplo, (b) sector afectado específico, (c) acción práctica para el lector. VER EJEMPLOS en el systemPrompt.',
+      'analysis_text: empieza con el hecho, no con introducción. 2-3 oraciones concretas.',
     ],
     limites: {
       // body_html: mínimo de palabras CONTADAS en texto plano (sin etiquetas HTML).
@@ -872,7 +886,7 @@ export async function rewriteAndAuditArticle(article) {
     tags:         [...new Set(tags)],
     readTimeMinutes: Math.max(3, Number(raw?.read_time_minutes) || 3),
     featured:     Boolean(raw?.featured),
-    isPublished:  true,
+    isPublished:  false,
     isDiscarded:  Boolean(raw?.is_discarded),
     authorName:   sanitizeText(raw?.author_name) || 'Equipo Editorial DolarPeruHoy',
     reviewedBy:   sanitizeText(raw?.reviewed_by) || 'Equipo Editorial DolarPeruHoy',
