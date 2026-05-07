@@ -12,19 +12,14 @@ const maxAgeDays = 0; // Noticias del mismo día, se asume que el feed se actual
 const MAX_AI_ARTICLES_PER_RUN = 6;
 
 // Google Ads compliance: detectar y rechazar clickbait
-const CLICKBAIT_INDICATORS = [
-  /\b(increíble|asombroso|shocking|nunca|jamás|siempre|CRASH|EXPLOSION|BOMBA)\b/gi,
-  /\?{2,}/g,
-  /(!){3,}/g,
+const CLICKBAIT_PATTERNS = [
+  /\b(increíble|impactante|shock|no vas a creer|revelado|filtrado)\b/i,
+  /(\?{2,}|!{3,})/,
+  /\b(te sorprenderá|lo que nadie dice)\b/i,
 ];
 
 function isClickbait(text) {
-  for (const pattern of CLICKBAIT_INDICATORS) {
-    if (pattern.test(text)) {
-      return true;
-    }
-  }
-  return false;
+  return CLICKBAIT_PATTERNS.some((pattern) => pattern.test(String(text ?? '')));
 }
 const fullScrapeEnabled = !['0', 'false', 'no', 'off'].includes(
   String(process.env.NEWS_FULL_SCRAPE_ENABLED ?? 'true').trim().toLowerCase()
@@ -260,6 +255,8 @@ const EXCLUDED_KEYWORDS_PERU = [
   'israel',
   'ucrania',
   'guerra',
+  'politica internacional',
+  'geopolitica',
   'drones',
   'bombardeo',
   'erdogan',
@@ -775,6 +772,7 @@ async function fetchFeed(feed) {
     for (const item of rawItems) {
       if (!item.title || !item.link) continue;
       if (!isFreshByPublishedDate(item.sourcePublishedAt)) continue;
+      if (isClickbait(item.title)) continue;
       if (!isHighQualityItem(item)) continue;
       if (!isRelevantForPeru(item)) continue;
       items.push(item);

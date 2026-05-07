@@ -1,6 +1,14 @@
+import * as cheerio from 'cheerio';
+
 const DEFAULT_MODEL = process.env.OPENAI_MODEL ?? 'gpt-4.1-mini';
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1';
 const timeoutMs = Number(process.env.OPENAI_TIMEOUT_MS ?? 30000);
+
+const ARTICLE_STRUCTURES = [
+  ['contexto', 'impacto_peru', 'analisis_economico'],
+  ['que_ocurrio', 'analisis', 'consecuencias'],
+  ['resumen', 'impacto', 'perspectiva_futura'],
+];
 
 function sanitizeText(text) {
   return String(text ?? '')
@@ -67,18 +75,65 @@ function extractJsonObject(text) {
   }
 }
 
-function calculateContentMetrics(text) {
-  const words = text.split(/\s+/).filter(Boolean);
-  const uniqueWords = new Set(words.map((w) => w.toLowerCase())).size;
-  const stopWords = ['a', 'el', 'la', 'de', 'que', 'y', 'en', 'es', 'por', 'para', 'con', 'como'];
-  const stopwordCount = words.filter((w) => stopWords.includes(w.toLowerCase())).length;
+function stableHash(input) {
+  let hash = 0;
+  const value = String(input ?? '');
+
+  for (let i = 0; i < value.length; i += 1) {
+    hash = (hash * 31 + (value.codePointAt(i) ?? 0)) | 0;
+  }
+
+  return hash;
+}
+
+function pickStructure(seed) {
+  const index = Math.abs(stableHash(seed)) % ARTICLE_STRUCTURES.length;
+  return ARTICLE_STRUCTURES[index];
+}
+
+function countHeadings(html) {
+  const $ = cheerio.load(String(html ?? ''));
+  return $('h2, h3').length;
+}
+
+function validateEditorialQuality(html) {
+  const $ = cheerio.load(String(html ?? ''));
+  const plainText = $.text();
+  const wordsArray = plainText.split(/\s+/).filter(Boolean);
+  const words = wordsArray.length;
+  const uniqueWords = new Set(wordsArray.map((word) => word.toLowerCase())).size;
+  const uniquenessRatio = uniqueWords / Math.max(1, words);
+  const headings = countHeadings(html);
 
   return {
-    totalWords: words.length,
-    uniqueWords,
-    uniqueRatio: uniqueWords / Math.max(1, words.length),
-    stopwordRatio: stopwordCount / Math.max(1, words.length),
-    hasSubheadings: (text.match(/<h2>|<h3>/gi) || []).length >= 3,
+    words,
+    uniquenessRatio,
+    headings,
+    isValid: words >= 500 && uniquenessRatio >= 0.45 && headings >= 2,
+  };
+}
+
+function addEditorialLayer(html, item) {
+  const insights = [
+    'Desde el contexto economico peruano actual, esto puede influir en decisiones financieras.',
+    'Este tipo de movimientos impacta directamente en consumidores y empresas en Peru.',
+    'Un punto clave es como esto se refleja en el tipo de cambio local.',
+  ];
+
+  const pick = insights[Math.abs(stableHash(item?.id ?? item?.slug ?? item?.title)) % insights.length];
+  return `${String(html ?? '').trim()}\n<p><strong>Nota editorial:</strong> ${pick}</p>`;
+}
+
+function calculateContentMetrics(html) {
+  const quality = validateEditorialQuality(html);
+
+  return {
+    totalWords: quality.words,
+    uniqueWords: Math.round(quality.uniquenessRatio * quality.words),
+    uniqueRatio: quality.uniquenessRatio,
+    headings: quality.headings,
+    hasSubheadings: quality.headings >= 2,
+    isValid: quality.isValid,
   };
 }
 
@@ -401,13 +456,13 @@ export async function selectBestArticles(articles) {
     'Prioriza utilidad, claridad, potencial SEO y diversidad tematica.',
     'Responde SOLO JSON valido.',
     'Formato exacto:',
-    '{"selected":[{"title":"","reason":"","topic":"","score":0}],"discarded":[{"title":"","reason":"","topic":""}],"summary":{"quality":"alta|media|baja"}}',
+    '{"selected":[{"title":"","reason":"","topic":"","score":0}],"discarded":[{"title":"","reason":"","topic":""}],"summary":{"focus":"","notes":""}}',
   ].join(' ');
 
   const userPrompt = JSON.stringify({
     instruction: 'Selecciona las mejores noticias economicas para publicar hoy.',
     constraints: {
-      minSelected: 3,
+      minSelected: 4,
       maxSelected: 6,
       semanticDeduplication: true,
       strictJson: true,
@@ -455,6 +510,8 @@ export async function selectBestArticles(articles) {
 }
 
 export async function rewriteAndAuditArticle(article) {
+  const selectedStructure = pickStructure(article?.id ?? article?.slug ?? article?.title);
+
   const data = {
     id: sanitizeText(article?.id ?? article?.slug).slice(0, 100),
     title: sanitizeText(article?.title).slice(0, 260),
@@ -471,8 +528,12 @@ export async function rewriteAndAuditArticle(article) {
     'FASE 1 VALIDACION ESTRICTA: si no cumple, devolver como no apta. Descarta contenido corto, basura, incoherente, irrelevante para economia peruana, demasiado internacional sin impacto Peru, espectaculos/deportes/farandula, clickbait o sin valor editorial.',
     'CASO DOLAR: si trata de tipo de cambio, no descartes por simplicidad; agrega contexto, causas e impacto economico local.',
     'FASE 2 REESCRITURA EDITORIAL: genera texto original, no resumen ni copia. Sin inventar cifras/declaraciones/estadisticas/proyecciones.',
-    'ESTRUCTURA OBLIGATORIA body_html: introduccion, H2 Que ocurrio, H2 Por que importa en Peru, H2 Impacto economico o financiero, conclusion util.',
-    'Minimo 3000 caracteres, minimo 500 palabras, minimo 3 subtitulos H2/H3, excelente legibilidad.',
+    'No repetir estructuras entre articulos consecutivos.',
+    'Variar orden de secciones en cada articulo.',
+    'No usar siempre los mismos subtitulos.',
+    'Incluir al menos un elemento variable: dato, contexto o implicancia.',
+    `ESTRUCTURA OBLIGATORIA para este articulo (orden exacto): ${selectedStructure.join(' -> ')}.`,
+    'Minimo 3000 caracteres, minimo 500 palabras, minimo 2 subtitulos H2/H3, excelente legibilidad.',
     'Usa solo etiquetas HTML: <p>, <h2>, <h3>, <ul>, <li>, <strong>. Sin scripts, iframes, embeds, publicidad o menciones al medio fuente.',
     'REGLAS DE SALIDA: devolver SOLO JSON valido y parseable. Nunca markdown. Nunca texto adicional.',
     'Formato JSON exacto:',
@@ -483,6 +544,7 @@ export async function rewriteAndAuditArticle(article) {
   const userPrompt = JSON.stringify({
     instruction: 'Audita calidad y reescribe articulo para publicacion editorial.',
     input: data,
+    estructura_obligatoria: selectedStructure,
     constraints: {
       minWords: 500,
       minBodyChars: 3000,
@@ -505,30 +567,23 @@ export async function rewriteAndAuditArticle(article) {
     };
   }
 
-  // Validar calidad de contenido reescrito
-  const metrics = calculateContentMetrics(raw?.body_html ?? '');
-  if (metrics.totalWords < 500) {
+  const quality = validateEditorialQuality(raw?.body_html ?? '');
+  if (quality.words < 500) {
     return {
       isValid: false,
       discardReason: 'Contenido muy corto (< 500 palabras). Rechazado por bajo valor.',
     };
   }
-  if (metrics.uniqueRatio < 0.45) {
+  if (quality.uniquenessRatio < 0.45) {
     return {
       isValid: false,
       discardReason: 'Contenido con insuficientes palabras únicas. Potencial relleno detectado.',
     };
   }
-  if (metrics.stopwordRatio > 0.55) {
+  if (quality.headings < 2) {
     return {
       isValid: false,
-      discardReason: 'Contenido con exceso de palabras funcionales. Potencial thin content.',
-    };
-  }
-  if (!metrics.hasSubheadings) {
-    return {
-      isValid: false,
-      discardReason: 'Contenido sin estructura de subtítulos (< 3 H2/H3). Mejora necesaria.',
+      discardReason: 'Contenido sin estructura de subtitulos (< 2 H2/H3). Mejora necesaria.',
     };
   }
 
@@ -541,7 +596,8 @@ export async function rewriteAndAuditArticle(article) {
   const seoTitle = sanitizeText(raw?.seo_title).slice(0, 70);
   const seoDescription = sanitizeText(raw?.seo_description).slice(0, 160);
   const excerpt = sanitizeText(raw?.excerpt).slice(0, 220);
-  const bodyHtml = String(raw?.body_html ?? '').trim();
+  const bodyHtml = addEditorialLayer(raw?.body_html ?? '', data);
+  const metrics = calculateContentMetrics(bodyHtml);
   const analysisText = sanitizeText(raw?.analysis_text);
   const impactText = sanitizeText(raw?.impact_text);
 
