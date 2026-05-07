@@ -801,12 +801,6 @@ async function runAiPublishingPipeline(selectedRecords) {
       console.log(`[news] destacado automatico asignado a articulo de dolar: ${draft.title.slice(0, 60)}`);
     }
 
-    const editorialDisclaimer = [
-      '<p><em>Este artículo ha sido reescrito y editado por IA para mejorar claridad y estructura. ',
-      `Fuente original: ${draft.source_name}. `,
-      'Publicado por Equipo Editorial DolarPeruHoy.</em></p>\n\n',
-    ].join('');
-
     const reviewer = edited.reviewedBy || DEFAULT_EDITORIAL_REVIEWER;
     const publishedAt = draft.source_published_at || draft.published_at || new Date().toISOString();
     const shouldPublish = Boolean(edited.isPublished);
@@ -817,7 +811,7 @@ async function runAiPublishingPipeline(selectedRecords) {
       title:           edited.title           || draft.title,
       slug:            edited.slug             || draft.slug,
       excerpt:         edited.excerpt          || draft.excerpt,
-      body_html:       editorialDisclaimer + (edited.bodyHtml || draft.body_html),
+      body_html:       edited.bodyHtml         || draft.body_html,
       analysis_text:   edited.analysisText     || draft.analysis_text,
       // FIX: impact_text se sobreescribe con el valor de la IA cuando está disponible,
       // cayendo al fallback del buildArticleRecord si la IA no lo devolvió.

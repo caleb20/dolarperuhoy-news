@@ -9,6 +9,8 @@ const editorialMinHeadings = clamp(Number(process.env.NEWS_EDITORIAL_MIN_HEADING
 const openAiMaxRetries = clamp(Number(process.env.OPENAI_MAX_RETRIES ?? 2), 1, 5);
 const openAiRetryBaseMs = clamp(Number(process.env.OPENAI_RETRY_BASE_MS ?? 1000), 100, 5000);
 const openAiMaxOutputTokens = clamp(Number(process.env.OPENAI_MAX_OUTPUT_TOKENS ?? 2500), 400, 6000);
+// Timeout extendido para selectBestArticles (batch grande, más tokens de entrada)
+const selectionTimeoutMs = Number(process.env.OPENAI_SELECTION_TIMEOUT_MS ?? timeoutMs * 2);
 
 // Longitud mínima de impact_text exigida al modelo
 const IMPACT_TEXT_MIN_CHARS = clamp(Number(process.env.NEWS_IMPACT_TEXT_MIN_CHARS ?? 180), 80, 600);
@@ -333,13 +335,13 @@ function extractResponsesText(payload) {
 // ---------------------------------------------------------------------------
 // Cliente JSON de OpenAI Responses API con fallback de formato
 // ---------------------------------------------------------------------------
-async function openAiJson(userPrompt, systemPrompt, schemaConfig) {
+async function openAiJson(userPrompt, systemPrompt, schemaConfig, customTimeoutMs) {
   if (!process.env.OPENAI_API_KEY) throw new Error('Missing OPENAI_API_KEY');
   if (!schemaConfig?.name || !schemaConfig?.schema) throw new Error('Missing JSON schema configuration');
 
   return withRetry(async () => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const timeout = setTimeout(() => controller.abort(), customTimeoutMs ?? timeoutMs);
 
     try {
       const basePayload = {
@@ -668,7 +670,7 @@ export async function selectBestArticles(articles) {
     const raw        = await openAiJson(userPrompt, systemPrompt, {
       name: 'news_selection',
       schema: buildSelectionSchema(allowedIdsList),
-    });
+    }, selectionTimeoutMs);  // timeout extendido para batch grande
     const normalized = normalizeSelectionResult(raw, allowedIds, titleToId);
 
     if (normalized.selected.length === 0) {
@@ -711,53 +713,57 @@ export async function rewriteAndAuditArticle(article) {
   };
 
   const systemPrompt = [
-    'Actua como redactor financiero senior, editor SEO y auditor de calidad editorial especializado en economia y finanzas de Peru.',
-    'Recibiras el HTML completo de una noticia obtenida por scraping y debes decidir si tiene calidad para publicarse en DolarPeruHoy.',
+    'Eres periodista económico peruano con 15 años de experiencia en medios como Gestión y El Comercio.',
+    'Tu escritura es directa, clara y útil para el lector común, no para académicos.',
+    'Escribes como un humano que conoce bien el día a día económico del peruano: el precio del dólar en el banco, la cuota del crédito, el costo de la canasta básica.',
 
-    // Fase 1: validación
-    'FASE 1 - VALIDACION: Descarta si el contenido es corto, incoherente, irrelevante para Peru, internacional sin impacto local, espectaculos/deportes/farandula, clickbait o sin valor editorial.',
-    'EXCEPCION DOLAR: Si trata de tipo de cambio o precio del dolar, nunca descartes por simplicidad. Agrega siempre contexto, causas macroeconomicas e impacto en el bolsillo del peruano.',
+    // VALIDACIÓN — breve, sin burocracia
+    'PASO 1 - DECIDE: ¿Vale la pena publicar esto para un peruano que busca información económica práctica?',
+    'Descarta si es: deportes, farándula, política sin impacto económico, noticia internacional sin efecto en Perú, contenido menor a 3 párrafos útiles.',
+    'NUNCA descartes noticias sobre dólar, tipo de cambio, inflación, BCRP, AFP, SUNAT, bancos o precios aunque sean cortas — amplíalas tú.',
 
-    // Fase 2: reescritura
-    'FASE 2 - REESCRITURA: Genera texto original periodistico. Prohibido inventar cifras, declaraciones, estadisticas o proyecciones no presentes en la fuente.',
-    'Varia estructura, orden de secciones y subtitulos en cada articulo para evitar repeticion.',
-    'Incluye al menos un dato concreto, contexto local o implicancia practica para el lector peruano.',
+    // REESCRITURA — estilo humano
+    'PASO 2 - REESCRIBE con estas reglas de estilo OBLIGATORIAS:',
+    '1. Primera oración: dato concreto o hecho, nunca una frase genérica. Ejemplo MALO: "La economía peruana enfrenta desafíos". Ejemplo BUENO: "El dólar cerró esta semana en S/3.46, su nivel más bajo en dos meses."',
+    '2. Subtítulos H2/H3: descriptivos y directos, nunca vagos. MALO: "Análisis de la situación". BUENO: "Por qué el BCRP intervino esta semana".',
+    '3. Prohibido usar estas frases: "en el contexto actual", "cabe destacar", "es importante mencionar", "en ese sentido", "en resumen", "en conclusión", "vale la pena señalar", "resulta fundamental", "es crucial", "juega un papel fundamental".',
+    '4. Cada párrafo debe tener UNA idea y máximo 4 oraciones. Sin párrafos relleno.',
+    '5. Usa cifras y ejemplos concretos cuando los haya en la fuente. Si no hay, usa comparaciones que el peruano entienda.',
+    '6. El tono es periodístico informativo, no académico ni corporativo.',
+    '7. Varía la longitud de las oraciones: mezcla oraciones cortas con otras más largas para que fluya natural.',
 
-    // Instrucciones específicas para analysis_text e impact_text — clave para el bug reportado
-    `analysis_text (${ANALYSIS_TEXT_MIN_CHARS}-${ANALYSIS_TEXT_MAX_CHARS} chars): Explica POR QUE esta noticia importa al lector peruano. Incluye: contexto macroeconomico local, que decision o accion puede tomar el lector, y que instituciones peruanas (BCRP, SUNAT, SBS, AFP) se ven involucradas si aplica.`,
-    `impact_text (${IMPACT_TEXT_MIN_CHARS}-${IMPACT_TEXT_MAX_CHARS} chars): Describe el IMPACTO CONCRETO en Peru. Menciona: como afecta al tipo de cambio, precios, empleo, consumo o sector especifico. Si la noticia es internacional, explica el canal de transmision hacia la economia peruana. NUNCA dejes este campo vacio, corto o generico.`,
+    // CAMPOS ESPECIALES
+    `analysis_text: 2-3 oraciones explicando por qué esta noticia le importa al peruano de a pie. Empieza directo, sin "Este artículo analiza" ni frases similares.`,
+    `impact_text: 2-3 oraciones sobre el efecto concreto en Perú: precios, empleo, tipo de cambio o bolsillo del consumidor. Si es noticia internacional, explica la conexión real con Perú en una oración. Sin frases genéricas.`,
 
-    // Estructura y formato
-    `ESTRUCTURA OBLIGATORIA (orden exacto): ${selectedStructure.join(' -> ')}.`,
-    `Minimo ${Math.max(2200, editorialMinWords * 5)} caracteres en body_html, minimo ${editorialMinWords} palabras, minimo ${editorialMinHeadings} subtitulos H2/H3.`,
-    'Etiquetas HTML permitidas UNICAMENTE: <p>, <h2>, <h3>, <ul>, <li>, <strong>. Sin scripts, iframes, embeds, publicidad ni menciones al medio fuente.',
+    // ESTRUCTURA y FORMATO
+    `Organiza el artículo en este orden: ${selectedStructure.join(' → ')}.`,
+    `Mínimo ${editorialMinWords} palabras en body_html. Mínimo ${editorialMinHeadings} subtítulos H2 o H3.`,
+    'Solo HTML permitido: <p>, <h2>, <h3>, <ul>, <li>, <strong>. Sin iframes, scripts ni publicidad.',
 
-    // Reglas de salida
-    'SALIDA: SOLO JSON valido y parseable. Sin markdown. Sin texto adicional fuera del JSON.',
-    'Formato exacto si es apta: {"is_valid":true,"discard_reason":"","title":"","slug":"","excerpt":"","body_html":"","analysis_text":"","impact_text":"","seo_title":"","seo_description":"","tags":[""],"read_time_minutes":3,"featured":false,"is_published":true,"is_discarded":false,"author_name":"Equipo DolarPeruHoy","reviewed_by":"Equipo Editorial DolarPeruHoy"}',
-    'Si NO es apta: {"is_valid":false,"discard_reason":"razon clara y concisa"}',
+    // SALIDA
+    'Devuelve ÚNICAMENTE JSON válido. Sin markdown, sin explicaciones fuera del JSON.',
+    'Si es apta: {"is_valid":true,"discard_reason":"","title":"","slug":"","excerpt":"","body_html":"","analysis_text":"","impact_text":"","seo_title":"","seo_description":"","tags":[""],"read_time_minutes":3,"featured":false,"is_published":true,"is_discarded":false,"author_name":"Equipo DolarPeruHoy","reviewed_by":"Equipo Editorial DolarPeruHoy"}',
+    'Si NO es apta: {"is_valid":false,"discard_reason":"motivo concreto en una línea"}',
   ].join(' ');
 
   const userPrompt = JSON.stringify({
-    instruction: 'Audita calidad y reescribe el articulo para publicacion editorial en DolarPeruHoy.',
+    instruction: 'Reescribe este artículo como lo haría un periodista económico peruano experimentado. Útil, directo, sin relleno.',
     input: data,
-    estructura_obligatoria: selectedStructure,
-    constraints: {
-      minWords: editorialMinWords,
-      minBodyChars: Math.max(2200, editorialMinWords * 5),
-      excerptMinChars: 140,
-      excerptMaxChars: 220,
-      seoTitleMaxChars: 70,
-      seoDescriptionMaxChars: 160,
-      titleMaxChars: 90,
-      readTimeMin: 3,
-      htmlTagsAllowed: ['p', 'h2', 'h3', 'ul', 'li', 'strong'],
-      // Recordatorio explícito para que el modelo no ignore los campos de impacto
-      impactTextMinChars: IMPACT_TEXT_MIN_CHARS,
-      impactTextMaxChars: IMPACT_TEXT_MAX_CHARS,
-      analysisTextMinChars: ANALYSIS_TEXT_MIN_CHARS,
-      analysisTextMaxChars: ANALYSIS_TEXT_MAX_CHARS,
-      impactTextNote: 'OBLIGATORIO: Describir impacto concreto en Peru. No dejar vacio ni generico.',
+    estructura: selectedStructure,
+    recordatorios_estilo: [
+      'Primera oración = dato concreto, no frase genérica',
+      'Subtítulos descriptivos y específicos',
+      'Prohibido: "en el contexto actual", "cabe destacar", "es importante mencionar", "en resumen", "juega un papel fundamental"',
+      'Párrafos cortos, una idea por párrafo',
+      'analysis_text e impact_text: concretos, sin frases de relleno, mínimo 2 oraciones cada uno',
+    ],
+    limites: {
+      minPalabras: editorialMinWords,
+      excerptChars: '140-220',
+      seoTitleChars: 'máx 70',
+      seoDescriptionChars: 'máx 160',
+      tituloChars: 'máx 90',
     },
   });
 
@@ -796,7 +802,6 @@ export async function rewriteAndAuditArticle(article) {
   const metrics        = calculateContentMetrics(bodyHtml);
 
   // impact_text: usar el valor del modelo si es válido, o loguear advertencia
-  const isPublished = Boolean(raw?.is_published) && !Boolean(raw?.is_discarded);
   const rawImpactText   = sanitizeText(raw?.impact_text);
   const rawAnalysisText = sanitizeText(raw?.analysis_text);
 
@@ -804,7 +809,7 @@ export async function rewriteAndAuditArticle(article) {
     console.warn(`[ai] impact_text insuficiente o generico para "${title.slice(0, 60)}". Longitud: ${rawImpactText.length}`);
   }
   if (!isAnalysisTextValid(rawAnalysisText)) {
-    console.warn(`[ai] analysis_text insuficiente o generico para "${title.slice(0, 60)}". Longitud: ${rawAnalysisText.length}`);
+    console.warn(`[ai] analysis_text insuficiente para "${title.slice(0, 60)}". Longitud: ${rawAnalysisText.length}`);
   }
 
   // impactText se devuelve siempre (el fallback lo pone scraper.js desde buildImpactText)
@@ -832,7 +837,7 @@ export async function rewriteAndAuditArticle(article) {
     tags:         [...new Set(tags)],
     readTimeMinutes: Math.max(3, Number(raw?.read_time_minutes) || 3),
     featured:     Boolean(raw?.featured),
-    isPublished,
+    isPublished:  false,
     isDiscarded:  Boolean(raw?.is_discarded),
     authorName:   sanitizeText(raw?.author_name) || 'Equipo Editorial DolarPeruHoy',
     reviewedBy:   sanitizeText(raw?.reviewed_by) || 'Equipo Editorial DolarPeruHoy',
