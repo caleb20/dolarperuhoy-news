@@ -483,7 +483,7 @@ export async function rewriteAndAuditArticle(article) {
   if (quality.headings < editorialMinHeadings) return { isValid: false, discardReason: `Sin subtítulos (< ${editorialMinHeadings} H2/H3).` };
 
   const tags           = toArray(raw?.tags).map(normalizeTag).filter(Boolean).slice(0, 8);
-  const title          = sanitizeText(raw?.title).slice(0, 90);
+  const title          = sanitizeText(raw?.title);
   const rawImpactText  = sanitizeText(raw?.impact_text);
   const rawAnalysis    = sanitizeText(raw?.analysis_text);
 
