@@ -490,9 +490,9 @@ export async function rewriteAndAuditArticle(article) {
   if (!isImpactTextValid(rawImpactText))  console.warn(`[ai] impact_text insuficiente para "${title.slice(0,60)}" (${rawImpactText.length} chars)`);
   if (!isAnalysisTextValid(rawAnalysis))  console.warn(`[ai] analysis_text insuficiente para "${title.slice(0,60)}" (${rawAnalysis.length} chars)`);
 
-  const impactText        = rawImpactText.slice(0, IMPACT_TEXT_MAX_CHARS);
-  const analysisText      = rawAnalysis.slice(0, ANALYSIS_TEXT_MAX_CHARS);
-  const mergedAnalysisText = mergeAnalysisAndImpact(analysisText, impactText).slice(0, ANALYSIS_TEXT_MAX_CHARS + IMPACT_TEXT_MAX_CHARS);
+  const impactText        = rawImpactText;
+  const analysisText      = rawAnalysis;
+  const mergedAnalysisText = mergeAnalysisAndImpact(analysisText, impactText);
   const bodyHtml          = addEditorialLayer(raw?.body_html ?? '', data);
 
   return {
