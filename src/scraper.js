@@ -491,7 +491,7 @@ async function runAiPublishingPipeline(selectedRecords) {
         const edited = await rewriteAndAuditArticle({ id: draft.slug, ...draft });
         if (!edited.isValid) {
           console.log(`[news] Rechazado por IA: ${edited.discardReason || 'validación fallida'}`);
-          return { draft, status: 'discarded' };
+          return { draft, status: 'discarded', edited };
         }
         return { draft, status: 'ok', edited };
       } catch (error) {
@@ -502,11 +502,26 @@ async function runAiPublishingPipeline(selectedRecords) {
     AI_CONCURRENCY
   );
 
+  const recordsDiscarded = [];
   for (const p of editResults) {
     const res = await p;
     if (!res || res.__pLimitError) continue;
     const { draft, status, edited } = res;
-    if (status !== 'ok') { result.discardedAfterEdit++; continue; }
+    if (status !== 'ok') {
+      result.discardedAfterEdit++;
+      if (status === 'discarded' || status === 'clickbait') {
+        recordsDiscarded.push({
+          ...draft,
+          is_discarded: true,
+          is_published: false,
+          review_status: 'rejected',
+          reviewed_by: DEFAULT_EDITORIAL_REVIEWER,
+          approved_by: null,
+          approved_at: null,
+        });
+      }
+      continue;
+    }
     result.edited++;
 
     const isDollar = detectIsDollarArticle(draft);
@@ -541,6 +556,15 @@ async function runAiPublishingPipeline(selectedRecords) {
       review_status:   shouldPublish ? 'published' : 'pending_review',
       published_at:    publishedAt,
     });
+  }
+
+  if (recordsDiscarded.length) {
+    const { error: discardError } = await supabase.from('news_articles').upsert(
+      recordsDiscarded,
+      { onConflict: 'slug', ignoreDuplicates: false }
+    );
+    if (discardError) console.warn('[news] Error guardando descartados:', discardError.message);
+    else console.log(`[news] ${recordsDiscarded.length} articulos marcados is_discarded=true en DB.`);
   }
 
   if (!recordsToPublish.length) { result.skipped = selectedRecords.length; return result; }

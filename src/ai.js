@@ -365,18 +365,20 @@ export async function selectBestArticles(articles) {
 
   const systemPrompt = [
     'Eres editor SEO senior de un portal financiero peruano.',
-    'Selecciona entre 5 y 8 noticias de mayor calidad e impacto económico para Perú. Si hay 8+ candidatas válidas, selecciona 8.',
+    'Selecciona entre 4 y 6 noticias de mayor calidad e impacto económico para Perú.',
     'Devuelve SIEMPRE el id exacto usando el campo id recibido.',
-    'Prioridades: dolar, tipo de cambio, BCRP, inflacion, mineria, bancos, AFP, SUNAT, exportaciones, empleo.',
+    'Prioridades: inflacion, BCRP, mineria, bancos, AFP, SUNAT, exportaciones, empleo, dolar.',
+    'REGLA CRITICA — LIMITE DOLAR: Maximo 2 noticias sobre dolar/tipo de cambio en todo el lote. Si hay mas de 2, conserva la mas completa (preferiblemente el cierre del dia con datos concretos) y descarta las demas como duplicados semanticos.',
+    'REGLA CRITICA — DIVERSIDAD: No puedes seleccionar 2 noticias del mismo tema. Una sobre apertura del dolar y otra sobre cierre del dolar ES el mismo tema — elige solo una.',
     'Descarta: deportes, farandula, policiales, clima, clickbait, internacional sin impacto Peru.',
-    'Detecta duplicados semanticos y elige solo la mejor version.',
-    'Prioriza diversidad tematica y potencial SEO.',
+    'Descarta noticias de vuelos, aeropuertos, transporte o logistica a MENOS que mencionen explicitamente un costo concreto, tarifa o impacto en precios para Peru (ej. "los fletes suben 12%").',
+    'Prioriza diversidad tematica: un articulo por tema. Si tienes dolar, inflacion, empleo, exportaciones — selecciona uno de cada uno.',
     'Responde SOLO JSON valido. Sin markdown.',
   ].join(' ');
 
   try {
     const raw = await openAiJson(
-      JSON.stringify({ instruction: 'Selecciona las mejores noticias economicas para publicar hoy.', constraints: { minSelected: 5, maxSelected: 8, semanticDeduplication: true, returnExactIds: true }, articles: compact }),
+      JSON.stringify({ instruction: 'Selecciona las mejores noticias economicas para publicar hoy.', constraints: { minSelected: 4, maxSelected: 6, maxDollarTipoCambioArticles: 2, semanticDeduplication: true, diversidadTematicaObligatoria: true, returnExactIds: true }, articles: compact }),
       systemPrompt,
       { name: 'news_selection', schema: buildSelectionSchema(allowedIdsList) },
       selectionTimeoutMs,
@@ -497,11 +499,11 @@ export async function rewriteAndAuditArticle(article) {
     isValid: true, discardReason: '',
     title: title || data.title,
     slug: slugify(raw?.slug || title || data.title).slice(0,120) || data.id || 'noticia-economia',
-    excerpt: sanitizeText(raw?.excerpt).slice(0,220) || data.excerpt,
+    excerpt: sanitizeText(raw?.excerpt) || data.excerpt,
     bodyHtml,
     analysisText, impactText, mergedAnalysisText,
-    seoTitle:       sanitizeText(raw?.seo_title).slice(0,70)  || title || data.title,
-    seoDescription: sanitizeText(raw?.seo_description).slice(0,160) || data.excerpt,
+    seoTitle:       sanitizeText(raw?.seo_title)  || title || data.title,
+    seoDescription: sanitizeText(raw?.seo_description) || data.excerpt,
     tags: [...new Set(tags)],
     readTimeMinutes: Math.max(3, Number(raw?.read_time_minutes) || 3),
     featured: Boolean(raw?.featured),
