@@ -430,6 +430,7 @@ export async function rewriteAndAuditArticle(article) {
     '5. Cifras concretas de la fuente. Si no hay, usa comparaciones que el peruano entienda.',
     '6. Tono periodístico, no académico.',
     '7. Mezcla oraciones cortas y largas para que fluya natural.',
+    'CAMPO featured: pon true SOLO si esta noticia es el hecho económico más importante del día: inversión estructural mayor (>US$100M), cambio de política del BCRP/SUNAT/AFP, crisis o reforma que afecta a millones. Las noticias diarias de apertura/cierre del dólar NO son featured. Ejemplos de featured=true: "Glencore triplicará producción de cobre", "BCRP sube tasa de referencia", "Chancay zona económica sin impuestos". Ejemplos de featured=false: "Dólar baja a S/3.45 este viernes".',
 
     'analysis_text: 2-3 oraciones directas sobre por qué importa al peruano. Sin "Este artículo analiza".',
 

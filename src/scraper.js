@@ -479,7 +479,6 @@ async function runAiPublishingPipeline(selectedRecords) {
   if (!selectedRecords.length) return result;
 
   const recordsToPublish = [];
-  let dolarFeaturedAlreadySet = false;
 
   const editResults = await pLimit(
     selectedRecords.map(draft => async () => {
@@ -524,13 +523,6 @@ async function runAiPublishingPipeline(selectedRecords) {
     }
     result.edited++;
 
-    const isDollar = detectIsDollarArticle(draft);
-    let shouldFeature = Boolean(edited.featured);
-    if (!dolarFeaturedAlreadySet && isDollar && !shouldFeature) {
-      shouldFeature = true; dolarFeaturedAlreadySet = true;
-      console.log(`[news] destacado automatico: ${draft.title.slice(0,60)}`);
-    }
-
     const reviewer = edited.reviewedBy || DEFAULT_EDITORIAL_REVIEWER;
     const publishedAt = draft.source_published_at || draft.published_at || new Date().toISOString();
     const shouldPublish = Boolean(edited.isPublished);
@@ -547,7 +539,7 @@ async function runAiPublishingPipeline(selectedRecords) {
       seo_description: edited.seoDescription   || draft.seo_description || draft.excerpt,
       tags:            mergeTags(draft.tags, edited.tags),
       read_time_minutes: Math.max(3, Number(edited.readTimeMinutes) || draft.read_time_minutes || 3),
-      featured:        shouldFeature,
+      featured:        Boolean(edited.featured),
       author_name:     edited.authorName       || DEFAULT_EDITORIAL_REVIEWER,
       reviewed_by:     reviewer,
       approved_by:     shouldPublish ? reviewer : null,
@@ -556,6 +548,43 @@ async function runAiPublishingPipeline(selectedRecords) {
       review_status:   shouldPublish ? 'published' : 'pending_review',
       published_at:    publishedAt,
     });
+  }
+
+  // Quitar featured de artículos obsoletos (regla de negocio, sin IA):
+  // • Dólar/tipo de cambio publicado ayer o antes → no featured (la info de precio ya caducó).
+  // • Cualquier artículo con más de 5 días → no featured.
+  {
+    const todayKey = dayKeyInLima(new Date());
+    const todayIdx = todayKey ? dayIndexFromKey(todayKey) : null;
+    for (const r of recordsToPublish) {
+      if (!r.featured || todayIdx === null) continue;
+      const rawDate = r.published_at || r.source_published_at;
+      const pubKey  = rawDate ? dayKeyInLima(new Date(rawDate)) : null;
+      const pubIdx  = pubKey ? dayIndexFromKey(pubKey) : null;
+      if (pubIdx === null) continue;
+      const ageDays = todayIdx - pubIdx;
+      if (detectIsDollarArticle(r) && ageDays >= 1) {
+        r.featured = false;
+        console.log(`[news] featured quitado (dolar, ${ageDays}d): ${r.title.slice(0, 60)}`);
+      } else if (ageDays > 5) {
+        r.featured = false;
+        console.log(`[news] featured quitado (>5 dias): ${r.title.slice(0, 60)}`);
+      }
+    }
+  }
+
+  // Garantizar exactamente 1 destacado por corrida:
+  // Si la IA no marcó ninguno, auto-destacar el de mayor read_time_minutes priorizando no-dólar.
+  // Si la IA marcó más de uno, conservar solo el primero.
+  const featuredIndexes = recordsToPublish.reduce((acc, r, i) => { if (r.featured) acc.push(i); return acc; }, []);
+  if (!featuredIndexes.length && recordsToPublish.length) {
+    const nonDollar = recordsToPublish.filter(r => !detectIsDollarArticle(r)).sort((a, b) => b.read_time_minutes - a.read_time_minutes);
+    const best = nonDollar[0] ?? [...recordsToPublish].sort((a, b) => b.read_time_minutes - a.read_time_minutes)[0];
+    best.featured = true;
+    console.log(`[news] destacado automatico (fallback): ${best.title.slice(0, 60)}`);
+  } else if (featuredIndexes.length > 1) {
+    for (const i of featuredIndexes.slice(1)) recordsToPublish[i].featured = false;
+    console.log(`[news] destacados reducidos a 1 (la IA marcó ${featuredIndexes.length}).`);
   }
 
   if (recordsDiscarded.length) {
